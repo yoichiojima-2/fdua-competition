@@ -42,6 +42,7 @@ lint:
 pre-commit: lint clean-project
 
 test:
+	cp tests/assets/1.pdf ${DATA_DIR}/downloads/documents/
 	uv run pytest -vvv
 
 backup-repo: clean-project
