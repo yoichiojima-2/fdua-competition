@@ -115,7 +115,10 @@ class RAG(ABC):
         returns:
             BaseModel: 構造化された回答を含むPydanticモデル
         """
-        return self.chain.invoke({**self.build_payload(query), "context": retrieve_context(vectorstore=self.vectorstore, query=query)})
+        return self.chain.invoke({
+            **self.build_payload(query), 
+            "context": retrieve_context(vectorstore=self.vectorstore, query=query)
+        })
 
 
 # [end: base rag class]
@@ -148,7 +151,11 @@ class ResearchAssistant(RAG):
         )
 
     def build_payload(self, query: str) -> dict[str, t.Any]:
-        return {"system_prompt": read_prompt("research_assistant"), "query": query, "language": self.language}
+        return {
+            "system_prompt": read_prompt("research_assistant"),
+            "query": query, 
+            "language": self.language
+        }
 
     @property
     def output_structure(self) -> BaseModel:

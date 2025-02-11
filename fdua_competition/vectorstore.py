@@ -3,9 +3,11 @@ vectorstoreの構築
 """
 
 from pathlib import Path
+from pprint import pprint
 import typing as t
 from langchain_chroma import Chroma
 from langchain_community.document_loaders import PyPDFium2Loader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_core.documents import Document
 from langchain_core.vectorstores import InMemoryVectorStore
 from langchain_core.vectorstores.base import VectorStore
@@ -13,8 +15,70 @@ from langchain_openai import AzureOpenAIEmbeddings, OpenAIEmbeddings
 from tenacity import retry, stop_after_attempt, wait_fixed
 from tqdm import tqdm
 
+from pydantic import BaseModel, Field
+from tenacity import retry, stop_after_attempt, wait_random
+import textwrap
+from langchain_openai import AzureChatOpenAI, ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate
+import re
+
 from fdua_competition.enums import EmbeddingModelOption, Mode, VectorStoreOption
 from fdua_competition.utils import get_root, print_before_retry
+
+def before_sleep_hook(state) -> None:
+    print(f":( retrying attempt {state.attempt_number} after exception: {state.outcome.exception()}")
+
+class CleansePDF(BaseModel):
+    output: str = Field(description="The cleansed 'response' string that satisfies the requirements.")
+
+
+def split_document(doc: Document) -> list[Document]:
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=120,
+        chunk_overlap=10,
+        separators=["\n\n", "\n", "。", "．", "？", "！", "「", "」", "【", "】"],
+    )
+    split_doc = splitter.split_text(doc.page_content)
+    return [Document(page_content=d, metadata=doc.metadata) for d in split_doc]
+
+def remove_special_characters(doc: Document) -> Document:
+    # remove control characters
+    pattern = r"[\x00-\x08\x0B-\x0C\x0E-\x1F]"
+    return Document(page_content=re.sub(pattern, "", doc.page_content), metadata=doc.metadata)
+
+
+@retry(stop=stop_after_attempt(24), wait=wait_random(min=0, max=8), before_sleep=before_sleep_hook)
+def cleanse_pdf(doc: Document) -> CleansePDF:
+    role = textwrap.dedent(
+        """
+        You are an intelligent assistant specializing in text refinement.
+        The input provided is raw data parsed from a PDF and may be messy or contain unwanted artifacts.
+        Your task is to clean up this raw context with only minimal modifications, ensuring that no important information is lost.
+
+        ## Instructions:
+        - Fix minor formatting issues (such as extra whitespace, punctuation errors, or unwanted artifacts) without removing any essential content.
+        - Do not rephrase or add new information.
+        - Preserve all critical details while cleaning the text.
+        - The final output must be a concise
+        - Do not use commas or special characters that may break JSON parsing.
+
+        ## Input:
+        - **context**: The raw context data extracted from a PDF.
+
+        ## Output:
+        Return the cleaned context text with minimal corrections, preserving all original information.
+        """
+    )
+    chat_model = AzureChatOpenAI(azure_deployment="4omini").with_structured_output(CleansePDF)
+    prompt_template = ChatPromptTemplate.from_messages([("system", role), ("user", "input: {input}")])
+    chain = prompt_template | chat_model
+
+    docs = split_document(doc)
+    cleansed_text = "".join([chain.invoke({"input": remove_special_characters(doc)}).output for doc in docs])
+    res = CleansePDF(input=doc.page_content, output=cleansed_text)
+    # print(f"[cleanse_pdf] done\n{dict_to_yaml(res.model_dump())}\n")
+    print(res)
+    return res
 
 
 def get_documents_dir(mode: Mode) -> Path:
@@ -30,6 +94,7 @@ def get_documents_dir(mode: Mode) -> Path:
     match mode:
         case Mode.TEST:
             return get_root() / "validation/documents"
+            # return get_root() / "validation/test_doc"
 
         case Mode.SUBMIT:
             return get_root() / "documents"
@@ -48,6 +113,15 @@ def get_document_list(document_dir: Path) -> list[Path]:
     """
     return [path for path in document_dir.glob("*.pdf")]
 
+def split_document(doc: Document) -> list[Document]:
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=20000,
+        chunk_overlap=20,
+        separators=["\n\n", "\n", "。", "．", "？", "！", "「", "」", "【", "】"],
+    )
+    split_doc = splitter.split_text(doc.page_content)
+    return [Document(page_content=d, metadata=doc.metadata) for d in split_doc]
+
 
 def load_pages(path: Path) -> t.Iterable[Document]:
     """
@@ -57,8 +131,35 @@ def load_pages(path: Path) -> t.Iterable[Document]:
     yields:
         Document: 読み込まれたDocumentページ
     """
-    for doc in PyPDFium2Loader(path).lazy_load():
-        yield doc
+    # for doc in PyPDFium2Loader(path).lazy_load():
+    docs = list(PyPDFium2Loader(path).lazy_load())
+    # text_splitter = RecursiveCharacterTextSplitter(
+    #     chunk_size=20000,  # チャンクのサイズ (文字数)
+    #     chunk_overlap=0,  # チャンクの重複サイズ (文字数)
+    # )
+    # print(type(docs[0]))
+    # # pprint(doc)
+    # pprint(docs[0])
+    
+
+    # documents = [Document(page_content=doc.page_content)]
+    # documents = [i.page_content for i in doc]
+    # print(type(documents[0]))
+    # chunks = text_splitter.split_documents([docs[0]])
+    # chunks = text_splitter.create_documents(docs[0].page_content)
+    chunk_list = []
+    for doc in docs:
+        # chunk_list.extend(split_document(doc))
+        chunk_list.extend([
+            Document(metadata = doc.metadata, page_content = cleanse_pdf(doc).output)
+        ])
+    
+    pprint(chunk_list)
+    pprint(type(chunk_list[0]))
+    chunks = chunk_list
+    # chunks = text_splitter.split_documents(doc)
+    # yield chunks
+    return chunks
 
 
 def get_embedding_model(opt: EmbeddingModelOption) -> OpenAIEmbeddings:
@@ -139,7 +240,8 @@ def _add_pages_to_vectorstore_in_batches(vectorstore: VectorStore, pages: t.Iter
         batch_size (int, optional): バッチサイズ (デフォルトは8)
     """
     batch = []
-
+    # print(pages)
+    print(type(pages))
     for page in tqdm(pages, desc="adding pages.."):
         batch.append(page)
 
@@ -162,9 +264,9 @@ def add_documents_to_vectorstore(documents: list[Path], vectorstore: VectorStore
     existing_sources = _get_existing_sources_in_vectorstore(vectorstore)
 
     for path in documents:
-        if str(path) in existing_sources:
-            print(f"[add_document_to_vectorstore] skipping existing document: {path}")
-            continue
+        # if str(path) in existing_sources:
+        #     print(f"[add_document_to_vectorstore] skipping existing document: {path}")
+        #     continue
 
         print(f"[add_document_to_vectorstore] adding document to vectorstore: {path}")
         pages = load_pages(path=path)
@@ -185,6 +287,7 @@ def build_vectorstore(output_name: str, mode: Mode, vectorstore_option: VectorSt
     embeddings = get_embedding_model(EmbeddingModelOption.AZURE)
     vectorstore = prepare_vectorstore(output_name=output_name, opt=vectorstore_option, embeddings=embeddings)
     docs = get_document_list(document_dir=get_documents_dir(mode=mode))
+    pprint(docs)
     add_documents_to_vectorstore(docs, vectorstore)
 
     return vectorstore
@@ -200,7 +303,7 @@ def retrieve_context(vectorstore: VectorStore, query: str) -> str:
     returns:
         str: 構築された文脈情報
     """
-    pages = vectorstore.as_retriever().invoke(query)
+    pages = vectorstore.as_retriever(search_type="similarity", search_kwargs={"k": 3}).invoke(query)
 
     # 各ページの内容とメタデータを整形して文脈として連結
     contexts = ["\n".join([f"page_content: {page.page_content}", f"metadata: {page.metadata}"]) for page in pages]

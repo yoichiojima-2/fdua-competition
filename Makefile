@@ -25,13 +25,13 @@ in:
 
 
 run: ${CSV_PATH}
-${CSV_PATH}: ${INSTALL_DIR}/.installed
+	# ${CSV_PATH}: ${INSTALL_DIR}/.installed
 	@echo "\nrunning..."
 	${UV} python -m fdua_competition.main -o ${OUTPUT_NAME}
 	@echo "done"
 
 evaluate: ${PWD}/${INSTALL_DIR}/evaluation/result/scoring.csv
-${PWD}/${INSTALL_DIR}/evaluation/result/scoring.csv: ${CSV_PATH}
+	# ${PWD}/${INSTALL_DIR}/evaluation/result/scoring.csv: ${CSV_PATH}
 	@echo "\nevaluating..."
 	${UV} python ${INSTALL_DIR}/evaluation/crag.py \
 		--model-name ${CHAT_MODEL} \
